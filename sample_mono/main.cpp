@@ -162,8 +162,8 @@ int main(int argc, char *argv[]) {
     std::cout << "GStreamer initialized successfully" << std::endl;
 
     int camera_id_0 = 0;
-    int rq_width=0;
-    int rq_height=0;
+    int rq_width=960;
+    int rq_height=600;
     int rq_fps = 30; // Default to 30 fps instead of 0
 
     if (argc > 1) camera_id_0 = atoi(argv[1]);
@@ -274,7 +274,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
         }
-        
+
         if (!camera_available) {
             std::cerr << "Camera ID " << camera_id_0 << " is not available!" << std::endl;
             return -1;
@@ -374,26 +374,6 @@ int main(int argc, char *argv[]) {
         std::cout << "Frame Generated: " << image_count << std::endl;
         image_count++;
 
-        // // Create filename with timestamp
-        // std::string filename = "frame_.png";
-
-        // // Save the frame to a file
-        // cv::imwrite(filename, rgb_cam0);
-        // sleep(5);
-        // std::cout << "Frame saved to file: " << filename << std::endl;
-        
-
-        // cv::resize(rgb_cam0, rgb_d, cv::Size(1280, 720));
-        // cv::imshow("image", rgb_d);
-        // key = cv::waitKey(2);
-
-        // if (key == 's') {
-        //   // saves the images
-        //   cv::imwrite("image_left_" + std::to_string(image_count) + ".png",
-        //               rgb_cam0);
-        //   std::cout << "images created." << std::endl;
-        //   image_count++;
-        // }
       }
       else {
         // Check if it's been more than 10 seconds since the last frame
@@ -401,11 +381,9 @@ int main(int argc, char *argv[]) {
         auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - last_frame_time).count();
         
         if (elapsed_time >= 10) {
-            std::cout << "No new frame received for 10 seconds. Rebooting camera..." << std::endl;
-            oc::ARGUS_STATE reboot_state = camera_0.reboot();
-            std::cout << "Camera reboot result: " << ARGUS_STATE2str(reboot_state) << std::endl;
-            
-            // Reset the timer after attempting to reboot
+            std::cout << "No new frame received for 10 seconds. exiting camera..." << std::endl;
+
+            return -1;
             last_frame_time = std::chrono::steady_clock::now();
         }
         

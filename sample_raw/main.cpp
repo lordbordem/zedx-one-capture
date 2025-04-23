@@ -60,7 +60,9 @@ int main(int argc, char *argv[]) {
         memcpy(rgb_cam0.data, cam_raw.getPixels(),
                cam_raw.getWidth() * cam_raw.getHeight() *
                    cam_raw.getNumberOfChannels()* cam_raw.getPixelDepth());
-        cv::imshow("Image RAW", rgb_cam0);
+        // cv::imshow("Image RAW", rgb_cam0);
+        cv::imwrite("test.png", rgb_cam0);
+        sleep(5);
         key = cv::waitKey(2);
       }
       else

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(argus_camera)
+project(argus_camera_v4l2)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -38,6 +38,6 @@ ELSE()
     set(ARGUS_LIB arguscapture)
 ENDIF()
 
-add_executable(argus_camera main.cpp)
-target_link_libraries(argus_camera ${ARGUS_LIB} pthread ${OpenCV_LIBRARIES} ${TegraMM_LIBRARIES} 
+add_executable(argus_camera_v4l2 main.cpp)
+target_link_libraries(argus_camera_v4l2 ${ARGUS_LIB} pthread ${OpenCV_LIBRARIES} ${TegraMM_LIBRARIES} 
                       ${GSTREAMER_LIBRARIES} ${GSTREAMER_BASE_LIBRARIES} ${GSTREAMER_APP_LIBRARIES})

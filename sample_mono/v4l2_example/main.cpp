@@ -54,10 +54,10 @@ bool writeToGstreamerShmsink(cv::Mat &frame, const std::string &socket_path = "/
         // Create pipeline elements
         pipeline = gst_pipeline_new("opencv-to-shmsink");
         appsrc = gst_element_factory_make("appsrc", "source");
-        GstElement *videoconvert = gst_element_factory_make("videoconvert", "converter");
+        // GstElement *videoconvert = gst_element_factory_make("videoconvert", "converter");
         GstElement *shmsink = gst_element_factory_make("shmsink", "sink");
 
-        if (!pipeline || !appsrc || !videoconvert || !shmsink)
+        if (!pipeline || !appsrc || !shmsink)
         {
             std::cerr << "Failed to create GStreamer elements" << std::endl;
             return false;
@@ -68,7 +68,7 @@ bool writeToGstreamerShmsink(cv::Mat &frame, const std::string &socket_path = "/
                                             "format", G_TYPE_STRING, "BGR",
                                             "width", G_TYPE_INT, width,
                                             "height", G_TYPE_INT, height,
-                                            "framerate", GST_TYPE_FRACTION, 30, 1,
+                                            "framerate", GST_TYPE_FRACTION, 15, 1,
                                             nullptr);
 
         g_object_set(G_OBJECT(appsrc),
@@ -83,15 +83,15 @@ bool writeToGstreamerShmsink(cv::Mat &frame, const std::string &socket_path = "/
                      "socket-path", socket_path.c_str(),
                      "sync", FALSE,
                      "wait-for-connection", FALSE,
-                     "shm-size", 10 * 1024 * 1024, // 10MB buffer
+                     "shm-size", 900000000000000, // 10MB buffer
                      "stream-name", stream_name.c_str(),
                      nullptr);
 
         // Add elements to pipeline
-        gst_bin_add_many(GST_BIN(pipeline), appsrc, videoconvert, shmsink, nullptr);
+        gst_bin_add_many(GST_BIN(pipeline), appsrc, shmsink, nullptr);
 
         // Link elements
-        if (!gst_element_link_many(appsrc, videoconvert, shmsink, nullptr))
+        if (!gst_element_link_many(appsrc, shmsink, nullptr))
         {
             std::cerr << "Failed to link GStreamer elements" << std::endl;
             gst_object_unref(pipeline);
@@ -213,9 +213,9 @@ int main(int argc, char *argv[])
     int rq_fps = 30; // Default to 30 fps instead of 0
     
     // Default color correction factors
-    double blue_scale = 1;   // Boost blue by 20%
-    double green_scale = 1;  // Reduce green by 20%
-    double red_scale = 1;   // Reduce red by 25%
+    double blue_scale = 1.3;   // Boost blue by 30%
+    double green_scale = 0.75; // Reduce green by 25%
+    double red_scale = 0.85;   // Reduce red by 15%
 
     if (argc > 1)
         camera_id_0 = atoi(argv[1]);
@@ -442,8 +442,8 @@ int main(int argc, char *argv[])
         };
     }
 
-    cv::Mat rgb_d, bayer_frame;
-    bayer_frame = cv::Mat(camera_0.getHeight(), camera_0.getWidth(), CV_16UC1, 1);
+    cv::Mat rgb_d, rgb_cam0;
+    rgb_cam0 = cv::Mat(camera_0.getHeight(), camera_0.getWidth(), CV_16UC1, 1);
 
     int image_count = 0;
 
@@ -475,72 +475,62 @@ int main(int argc, char *argv[])
         {
             // Update the last frame time when a new frame is received
             last_frame_time = std::chrono::steady_clock::now();
-   
-            // Get the raw pixel data
-            unsigned char* raw_pixels = camera_0.getPixels();
+
+            // Create a temporary Mat to hold the raw Bayer data
+            cv::Mat bayer_frame(camera_0.getHeight(), camera_0.getWidth(), CV_16UC1);
             
-            // Create a Mat from the raw pixel data
-            cv::Mat raw_mat(camera_0.getHeight(), camera_0.getWidth(), CV_16UC1, raw_pixels);
+            // Copy the raw pixel data
+            memcpy(bayer_frame.data, camera_0.getPixels(),
+                   camera_0.getWidth() * camera_0.getHeight() *
+                       camera_0.getNumberOfChannels() * camera_0.getPixelDepth());
             
-            // Make a copy of the raw data to avoid modifying the original
-            cv::Mat bayer_frame;
-            raw_mat.copyTo(bayer_frame);
-            
-            // Debug: Print min/max values of the raw data
-            double min_val, max_val;
-            cv::minMaxLoc(bayer_frame, &min_val, &max_val);
-            std::cout << "Raw data min/max: " << min_val << "/" << max_val << std::endl;
-            
-            // Normalize the raw data to use the full 10-bit range
-            cv::Mat normalized_bayer;
-            cv::normalize(bayer_frame, normalized_bayer, 0, 1023, cv::NORM_MINMAX, CV_16UC1);
-            
-            // Convert from 10-bit to 8-bit
+            // Keep the stronger scaling factor to reduce overexposure
             cv::Mat bayer_8bit;
-            normalized_bayer.convertTo(bayer_8bit, CV_8UC1, 255.0/1023.0); // Scale from 10-bit to 8-bit
+            bayer_frame.convertTo(bayer_8bit, CV_8UC1, 1.0/256.0); // Keep aggressive scaling to reduce brightness
             
-            // Debug: Print min/max values after conversion
-            cv::minMaxLoc(bayer_8bit, &min_val, &max_val);
-            std::cout << "8-bit data min/max: " << min_val << "/" << max_val << std::endl;
-            
-            // Convert from Bayer to RGB using the correct pattern (RGGB)
+            // Try original GBRG Bayer pattern
             cv::Mat rgb_frame;
-            cv::cvtColor(bayer_8bit, rgb_frame, cv::COLOR_BayerGB2BGR); // RGGB pattern
+            cv::cvtColor(bayer_8bit, rgb_frame, cv::COLOR_BayerGB2BGR);
             
-            // Debug: Print min/max values of RGB channels
-            std::vector<cv::Mat> debug_channels;
-            cv::split(rgb_frame, debug_channels);
-            for (int i = 0; i < 3; i++) {
-                cv::minMaxLoc(debug_channels[i], &min_val, &max_val);
-                std::cout << "RGB channel " << i << " min/max: " << min_val << "/" << max_val << std::endl;
-            }
-            
-            // Apply color correction to fix yellow tint
-            // Split the image into BGR channels
+            // Apply a targeted white balance correction to counter yellow hue
+            // Split the image into channels (BGR order in OpenCV)
             std::vector<cv::Mat> channels;
             cv::split(rgb_frame, channels);
             
-            // Apply scaling factors to each channel
-            // Note: OpenCV uses BGR order, not RGB
-            cv::Mat blue_channel, green_channel, red_channel;
-            channels[0].convertTo(blue_channel, CV_8UC1, blue_scale);   // Blue channel
-            channels[1].convertTo(green_channel, CV_8UC1, green_scale); // Green channel
-            channels[2].convertTo(red_channel, CV_8UC1, red_scale);     // Red channel
+            // Find the maximum value in each channel
+            double maxB, maxG, maxR;
+            cv::minMaxLoc(channels[0], nullptr, &maxB);
+            cv::minMaxLoc(channels[1], nullptr, &maxG);
+            cv::minMaxLoc(channels[2], nullptr, &maxR);
             
-            // Replace the channels
-            channels[0] = blue_channel;
-            channels[1] = green_channel;
-            channels[2] = red_channel;
+            // Calculate scaling factors to normalize each channel
+            double scaleB = (maxB > 0) ? 255.0 / maxB : 1.0;
+            double scaleG = (maxG > 0) ? 255.0 / maxG : 1.0;
+            double scaleR = (maxR > 0) ? 255.0 / maxR : 1.0;
             
-            // Merge the channels back
+            // Normalize the scaling factors to prevent over-amplification
+            double maxScale = std::max({scaleB, scaleG, scaleR});
+            if (maxScale > 2.0) {
+                scaleB = scaleB / maxScale * 2.0;
+                scaleG = scaleG / maxScale * 2.0;
+                scaleR = scaleR / maxScale * 2.0;
+            }
+            
+            // Apply the user-configurable color correction factors
+            scaleB *= blue_scale;
+            scaleG *= green_scale;
+            scaleR *= red_scale;
+            
+            // Apply scaling to each channel
+            channels[0] *= scaleB;  // Blue
+            channels[1] *= scaleG;  // Green
+            channels[2] *= scaleR;  // Red
+            
+            // Merge channels back
             cv::merge(channels, rgb_frame);
             
-            // Debug: Print min/max values after color correction
-            cv::split(rgb_frame, debug_channels);
-            for (int i = 0; i < 3; i++) {
-                cv::minMaxLoc(debug_channels[i], &min_val, &max_val);
-                std::cout << "Corrected channel " << i << " min/max: " << min_val << "/" << max_val << std::endl;
-            }
+            // Copy to rgb_cam0 for display and saving
+            rgb_frame.copyTo(rgb_cam0);
 
             // Check if the frame is valid before writing to GStreamer
             if (!rgb_frame.empty())
@@ -565,25 +555,25 @@ int main(int argc, char *argv[])
                                             current_time - last_save_time)
                                             .count();
 
-            if (time_since_last_save >= 10)
-            { // 60 seconds = 1 minute
-                // Get current time for filename
-                auto now = std::chrono::system_clock::now();
-                auto now_time_t = std::chrono::system_clock::to_time_t(now);
-                std::stringstream ss;
-                ss << std::put_time(std::localtime(&now_time_t), "%Y%m%d_%H%M%S");
-                std::string timestamp = ss.str();
+            // if (time_since_last_save >= 10)
+            // { // 60 seconds = 1 minute
+            //     // Get current time for filename
+            //     auto now = std::chrono::system_clock::now();
+            //     auto now_time_t = std::chrono::system_clock::to_time_t(now);
+            //     std::stringstream ss;
+            //     ss << std::put_time(std::localtime(&now_time_t), "%Y%m%d_%H%M%S");
+            //     std::string timestamp = ss.str();
 
-                // Create filename with timestamp
-                std::string filename = save_dir + "/frame.png";
+            //     // Create filename with timestamp
+            //     std::string filename = save_dir + "/frame.png";
 
-                // Save the frame to a file
-                cv::imwrite(filename, rgb_frame);
-                std::cout << "Frame saved to file: " << filename << std::endl;
+            //     // Save the frame to a file
+            //     cv::imwrite(filename, rgb_cam0);
+            //     std::cout << "Frame saved to file: " << filename << std::endl;
 
-                // Update the last save time
-                last_save_time = current_time;
-            }
+            //     // Update the last save time
+            //     last_save_time = current_time;
+            // }
 
         }
         else

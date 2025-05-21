@@ -152,7 +152,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
 }
 
 // Function to write raw pixel data to GStreamer shmsink pipeline
-bool writeToGstreamerShmsink(int camera_index, unsigned char* pixel_data, int width, int height, int channels) {
+bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, int width, int height, int channels) {
     // Ensure camera_index is valid
     if (camera_index >= camera_pipelines.size()) {
         std::cerr << "Invalid camera index: " << camera_index << std::endl;

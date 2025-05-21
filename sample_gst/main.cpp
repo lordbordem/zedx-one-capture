@@ -6,10 +6,19 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <signal.h>
+#include <csignal>
 #include "ArgusCapture.hpp"
 #include "opencv2/opencv.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+
+// Global flag to indicate when the program should terminate
+static std::atomic<bool> g_terminate(false);
+
+// Vector to store camera objects for cleanup
+static std::vector<oc::ArgusBayerCapture*> g_cameras;
+static std::mutex g_cameras_mutex;
 
 // Structure to hold camera pipeline data
 struct CameraPipeline {
@@ -25,6 +34,14 @@ struct CameraPipeline {
 
 // Global vector to store camera pipelines
 static std::vector<std::unique_ptr<CameraPipeline>> camera_pipelines;
+
+// Signal handler for graceful termination
+void signal_handler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        std::cout << "\nReceived termination signal. Shutting down gracefully..." << std::endl;
+        g_terminate.store(true);
+    }
+}
 
 // Function to create GStreamer shmsink pipeline
 bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_path, 
@@ -207,6 +224,24 @@ void cleanupAllGstreamerPipelines() {
     }
 }
 
+// Function to clean up all camera resources
+void cleanupAllCameras() {
+    std::lock_guard<std::mutex> lock(g_cameras_mutex);
+    for (auto camera : g_cameras) {
+        if (camera) {
+            camera->closeCamera();
+            std::cout << "Camera closed" << std::endl;
+        }
+    }
+    g_cameras.clear();
+}
+
+// Function to clean up all resources
+void cleanupAllResources() {
+    cleanupAllGstreamerPipelines();
+    cleanupAllCameras();
+}
+
 // Thread function to handle a camera
 void cameraThread(int camera_id, int width, int height, int fps) {
     std::string socket_path = "/dev/shm/sensor_" + std::to_string(camera_id);
@@ -225,7 +260,14 @@ void cameraThread(int camera_id, int width, int height, int fps) {
     }
     
     // Create camera object
-    oc::ArgusBayerCapture camera;
+    oc::ArgusBayerCapture* camera = new oc::ArgusBayerCapture();
+    
+    // Register camera for cleanup
+    {
+        std::lock_guard<std::mutex> lock(g_cameras_mutex);
+        g_cameras.push_back(camera);
+    }
+    
     oc::ArgusCameraConfig config;
     
     // Configure camera
@@ -248,38 +290,60 @@ void cameraThread(int camera_id, int width, int height, int fps) {
               << "x" << (height > 0 ? std::to_string(height) : "default")
               << ", requested FPS: " << (fps > 0 ? std::to_string(fps) : "default") << std::endl;
     
-    oc::ARGUS_STATE state = camera.openCamera(config);
+    oc::ARGUS_STATE state = camera->openCamera(config);
     if (state != oc::ARGUS_STATE::OK) {
         std::cerr << "Camera " << camera_id << ": Failed to open Camera, error code " << ARGUS_STATE2str(state) << std::endl;
+        
+        // Remove camera from cleanup list
+        {
+            std::lock_guard<std::mutex> lock(g_cameras_mutex);
+            auto it = std::find(g_cameras.begin(), g_cameras.end(), camera);
+            if (it != g_cameras.end()) {
+                g_cameras.erase(it);
+            }
+        }
+        
+        delete camera;
         return;
     }
     
     std::cout << "Camera " << camera_id << ": Camera opened successfully with resolution: " 
-              << camera.getWidth() << "x" << camera.getHeight() 
-              << ", channels: " << camera.getNumberOfChannels() << std::endl;
+              << camera->getWidth() << "x" << camera->getHeight() 
+              << ", channels: " << camera->getNumberOfChannels() << std::endl;
     
     // Initialize GStreamer pipeline
-    if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, camera.getWidth(), camera.getHeight())) {
+    if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, camera->getWidth(), camera->getHeight())) {
         std::cerr << "Camera " << camera_id << ": Failed to create GStreamer pipeline, exiting..." << std::endl;
-        camera.closeCamera();
+        camera->closeCamera();
+        
+        // Remove camera from cleanup list
+        {
+            std::lock_guard<std::mutex> lock(g_cameras_mutex);
+            auto it = std::find(g_cameras.begin(), g_cameras.end(), camera);
+            if (it != g_cameras.end()) {
+                g_cameras.erase(it);
+            }
+        }
+        
+        delete camera;
         return;
     }
     
-    cv::Mat frame = cv::Mat(camera.getHeight(), camera.getWidth(), CV_8UC4, 1);
+    cv::Mat frame = cv::Mat(camera->getHeight(), camera->getWidth(), CV_8UC4, 1);
     int image_count = 0;
     
     // Variable to track the last time a frame was received
     auto last_frame_time = std::chrono::steady_clock::now();
     
-    while (true) {
-        if (camera.isNewFrame()) {
+    while (!g_terminate.load()) {
+        if (camera->isNewFrame()) {
             // Update the last frame time when a new frame is received
             last_frame_time = std::chrono::steady_clock::now();
             
-            memcpy(frame.data, camera.getPixels(),
-                   camera.getWidth() * camera.getHeight() * camera.getNumberOfChannels());
+            memcpy(frame.data, camera->getPixels(),
+                   camera->getWidth() * camera->getHeight() * camera->getNumberOfChannels());
             
-            // Check if the frame is valid before writing to GStreamer
+            // Check if frame is valid before writing to GStreamer
             if (!frame.empty()) {
                 // Write the frame to GStreamer shmsink pipeline
                 if (!writeToGstreamerShmsink(camera_id, frame)) {
@@ -305,11 +369,30 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         }
     }
     
-    camera.closeCamera();
+    std::cout << "Camera " << camera_id << ": Thread exiting, cleaning up resources..." << std::endl;
+    
+    // Clean up resources
     cleanupGstreamerPipeline(camera_id);
+    camera->closeCamera();
+    
+    // Remove camera from cleanup list
+    {
+        std::lock_guard<std::mutex> lock(g_cameras_mutex);
+        auto it = std::find(g_cameras.begin(), g_cameras.end(), camera);
+        if (it != g_cameras.end()) {
+            g_cameras.erase(it);
+        }
+    }
+    
+    delete camera;
+    std::cout << "Camera " << camera_id << ": Resources cleaned up" << std::endl;
 }
 
 int main(int argc, char *argv[]) {
+    // Set up signal handler for graceful termination
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+    
     // Initialize GStreamer early to catch any initialization errors
     GError *gst_error = nullptr;
     if (!gst_init_check(nullptr, nullptr, &gst_error)) {
@@ -456,23 +539,28 @@ int main(int argc, char *argv[]) {
             camera_threads.emplace_back(cameraThread, camera_id, rq_width, rq_height, rq_fps);
         }
         
-        // Wait for all threads to complete
+        std::cout << "All camera threads started. Press Ctrl+C to exit." << std::endl;
+        
+        // Wait for all threads to complete or for termination signal
         for (auto& thread : camera_threads) {
             thread.join();
         }
         
-        // Clean up all GStreamer pipelines
-        cleanupAllGstreamerPipelines();
+        std::cout << "All camera threads have completed." << std::endl;
+        
+        // Clean up all resources
+        cleanupAllResources();
         
     } catch (const std::exception& e) {
         std::cerr << "Exception during camera initialization: " << e.what() << std::endl;
-        cleanupAllGstreamerPipelines();
+        cleanupAllResources();
         return -1;
     } catch (...) {
         std::cerr << "Unknown exception during camera initialization" << std::endl;
-        cleanupAllGstreamerPipelines();
+        cleanupAllResources();
         return -1;
     }
 
+    std::cout << "Program exiting cleanly" << std::endl;
     return 0;
 }

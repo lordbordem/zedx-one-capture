@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <deque>
 #include "ArgusCapture.hpp"
-#include "opencv2/opencv.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 

@@ -106,7 +106,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
                 "socket-path", socket_path.c_str(),
                 "sync", FALSE,
                 "wait-for-connection", FALSE,
-                "shm-size", 10 * 1024 * 1024, // 10MB buffer
+                "shm-size", 100 * 1024 * 1024, // 10MB buffer
                 "stream-name", stream_name.c_str(),
                 nullptr);
     

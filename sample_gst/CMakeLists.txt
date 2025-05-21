@@ -3,10 +3,6 @@ project(argus_camera)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(OpenCV REQUIRED)
-include_directories(${OPENCV_INCLUDE_DIRS})
-link_directories(${OpenCV_LIBRARY_DIRS})
-
 # Find GStreamer packages
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
@@ -39,5 +35,5 @@ ELSE()
 ENDIF()
 
 add_executable(argus_camera main.cpp)
-target_link_libraries(argus_camera ${ARGUS_LIB} pthread ${OpenCV_LIBRARIES} ${TegraMM_LIBRARIES} 
+target_link_libraries(argus_camera ${ARGUS_LIB} pthread ${TegraMM_LIBRARIES} 
                       ${GSTREAMER_LIBRARIES} ${GSTREAMER_BASE_LIBRARIES} ${GSTREAMER_APP_LIBRARIES})

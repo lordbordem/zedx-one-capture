@@ -9,7 +9,6 @@
 #include <signal.h>
 #include <csignal>
 #include "ArgusCapture.hpp"
-#include "opencv2/opencv.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 
@@ -46,7 +45,8 @@ void signal_handler(int signal) {
 // Function to create GStreamer shmsink pipeline
 bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_path, 
                                    const std::string &stream_name, 
-                                   int width = 0, int height = 0) {
+                                   int width = 0, int height = 0, 
+                                   int channels = 4) {
     // Ensure camera_index is valid
     if (camera_index >= camera_pipelines.size()) {
         std::cerr << "Invalid camera index: " << camera_index << std::endl;
@@ -76,7 +76,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     pipeline_data->stream_name = stream_name;
     
     // Create pipeline elements
-    pipeline_data->pipeline = gst_pipeline_new(("opencv-to-shmsink-" + std::to_string(camera_index)).c_str());
+    pipeline_data->pipeline = gst_pipeline_new(("argus-to-shmsink-" + std::to_string(camera_index)).c_str());
     pipeline_data->appsrc = gst_element_factory_make("appsrc", ("source-" + std::to_string(camera_index)).c_str());
     GstElement *videoconvert = gst_element_factory_make("videoconvert", ("converter-" + std::to_string(camera_index)).c_str());
     GstElement *shmsink = gst_element_factory_make("shmsink", ("sink-" + std::to_string(camera_index)).c_str());
@@ -86,9 +86,11 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
         return false;
     }
     
-    // Configure appsrc
+    // Configure appsrc with the appropriate format based on the number of channels
+    const char* format_str = (channels == 4) ? "RGBA" : (channels == 3) ? "RGB" : "GRAY8";
+    
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                       "format", G_TYPE_STRING, "BGR",
+                                       "format", G_TYPE_STRING, format_str,
                                        "width", G_TYPE_INT, width,
                                        "height", G_TYPE_INT, height,
                                        "framerate", GST_TYPE_FRACTION, 30, 1,
@@ -106,7 +108,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
                 "socket-path", socket_path.c_str(),
                 "sync", FALSE,
                 "wait-for-connection", FALSE,
-                "shm-size", 100 * 1024 * 1024, // 10MB buffer
+                "shm-size", 100 * 1024 * 1024, // 100MB buffer
                 "stream-name", stream_name.c_str(),
                 nullptr);
     
@@ -136,8 +138,8 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     return true;
 }
 
-// Function to write OpenCV Mat to GStreamer shmsink pipeline
-bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
+// Function to write raw pixel data to GStreamer shmsink pipeline
+bool writeToGstreamerShmsink(int camera_index, unsigned char* pixel_data, int width, int height, int channels) {
     // Ensure camera_index is valid
     if (camera_index >= camera_pipelines.size()) {
         std::cerr << "Invalid camera index: " << camera_index << std::endl;
@@ -148,9 +150,9 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     CameraPipeline *pipeline_data = camera_pipelines[camera_index].get();
     std::lock_guard<std::mutex> lock(pipeline_data->mutex);
     
-    // Check if frame is valid
-    if (frame.empty()) {
-        std::cerr << "Error: Cannot write empty frame to GStreamer pipeline for camera " << camera_index << std::endl;
+    // Check if pixel data is valid
+    if (pixel_data == nullptr) {
+        std::cerr << "Error: Cannot write null pixel data to GStreamer pipeline for camera " << camera_index << std::endl;
         return false;
     }
     
@@ -161,13 +163,16 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     }
     
     // Check if frame dimensions match the pipeline configuration
-    if (frame.cols != pipeline_data->frame_width || frame.rows != pipeline_data->frame_height) {
+    if (width != pipeline_data->frame_width || height != pipeline_data->frame_height) {
         std::cerr << "Frame dimensions do not match pipeline configuration for camera " << camera_index << std::endl;
         return false;
     }
     
-    // Create GstBuffer from OpenCV Mat
-    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, frame.total() * frame.elemSize(), nullptr);
+    // Calculate buffer size based on dimensions and channels
+    size_t buffer_size = width * height * channels;
+    
+    // Create GstBuffer from pixel data
+    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, buffer_size, nullptr);
     if (!buffer) {
         std::cerr << "Failed to allocate GStreamer buffer for camera " << camera_index << std::endl;
         return false;
@@ -176,8 +181,8 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     // Map buffer for writing
     GstMapInfo map;
     if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
-        // Copy frame data to buffer
-        memcpy(map.data, frame.data, frame.total() * frame.elemSize());
+        // Copy pixel data to buffer
+        memcpy(map.data, pixel_data, buffer_size);
         gst_buffer_unmap(buffer, &map);
         
         // Set buffer timestamp and duration
@@ -312,7 +317,9 @@ void cameraThread(int camera_id, int width, int height, int fps) {
               << ", channels: " << camera->getNumberOfChannels() << std::endl;
     
     // Initialize GStreamer pipeline
-    if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, camera->getWidth(), camera->getHeight())) {
+    if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 
+                                       camera->getWidth(), camera->getHeight(), 
+                                       camera->getNumberOfChannels())) {
         std::cerr << "Camera " << camera_id << ": Failed to create GStreamer pipeline, exiting..." << std::endl;
         camera->closeCamera();
         
@@ -329,7 +336,6 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         return;
     }
     
-    cv::Mat frame = cv::Mat(camera->getHeight(), camera->getWidth(), CV_8UC4, 1);
     int image_count = 0;
     
     // Variable to track the last time a frame was received
@@ -340,17 +346,19 @@ void cameraThread(int camera_id, int width, int height, int fps) {
             // Update the last frame time when a new frame is received
             last_frame_time = std::chrono::steady_clock::now();
             
-            memcpy(frame.data, camera->getPixels(),
-                   camera->getWidth() * camera->getHeight() * camera->getNumberOfChannels());
+            // Get the raw pixel data directly from the camera
+            unsigned char* pixel_data = camera->getPixels();
             
-            // Check if frame is valid before writing to GStreamer
-            if (!frame.empty()) {
-                // Write the frame to GStreamer shmsink pipeline
-                if (!writeToGstreamerShmsink(camera_id, frame)) {
+            // Check if pixel data is valid before writing to GStreamer
+            if (pixel_data != nullptr) {
+                // Write the pixel data directly to GStreamer shmsink pipeline
+                if (!writeToGstreamerShmsink(camera_id, pixel_data, 
+                                           camera->getWidth(), camera->getHeight(), 
+                                           camera->getNumberOfChannels())) {
                     std::cerr << "Camera " << camera_id << ": Failed to write frame to GStreamer pipeline" << std::endl;
                 }
             } else {
-                std::cerr << "Camera " << camera_id << ": Warning: Skipping empty frame" << std::endl;
+                std::cerr << "Camera " << camera_id << ": Warning: Skipping null pixel data" << std::endl;
             }
             
             std::cout << "Camera " << camera_id << ": Frame Generated: " << image_count << std::endl;

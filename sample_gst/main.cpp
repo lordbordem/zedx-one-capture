@@ -286,7 +286,67 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
         g_cameras.push_back(camera);
     }
     
-    // Create configuration for the camera
+    // Check if we need to run the camera with default settings first
+    // (This is needed for 960x600 at 15FPS to work properly)
+    bool needs_two_stage_init = (rq_width == 960 && rq_height == 600 && rq_fps == 15);
+    
+    if (needs_two_stage_init) {
+        std::cout << "Camera " << camera_id << ": Using two-stage initialization for 960x600@15FPS" << std::endl;
+        
+        // First stage: Run with default settings (0, 0, 0)
+        oc::ArgusCameraConfig default_config;
+        default_config.mDeviceId = camera_id;
+        default_config.mFPS = 0;  // default
+        default_config.mWidth = 0;  // default
+        default_config.mHeight = 0;  // default
+        default_config.verbose_level = 3;
+        default_config.hdr = false;
+        
+        std::cout << "Camera " << camera_id << ": Stage 1 - Opening camera with default settings" << std::endl;
+        
+        oc::ARGUS_STATE state = camera->openCamera(default_config);
+        if (state != oc::ARGUS_STATE::OK) {
+            std::cerr << "Camera " << camera_id << ": Failed to open Camera with default settings, error code " 
+                      << ARGUS_STATE2str(state) << std::endl;
+            
+            // Remove camera from cleanup list
+            {
+                std::lock_guard<std::mutex> lock(g_cameras_mutex);
+                auto it = std::find(g_cameras.begin(), g_cameras.end(), camera);
+                if (it != g_cameras.end()) {
+                    g_cameras.erase(it);
+                }
+            }
+            
+            delete camera;
+            return;
+        }
+        
+        std::cout << "Camera " << camera_id << ": Camera opened with default settings. Resolution: " 
+                  << camera->getWidth() << "x" << camera->getHeight() 
+                  << ", channels: " << camera->getNumberOfChannels() << std::endl;
+        
+        // Run for 10 frames with default settings
+        std::cout << "Camera " << camera_id << ": Running 10 frames with default settings..." << std::endl;
+        int frame_count = 0;
+        while (frame_count < 10 && !g_terminate.load()) {
+            if (camera->isNewFrame()) {
+                frame_count++;
+                std::cout << "Camera " << camera_id << ": Default settings frame " << frame_count << "/10" << std::endl;
+            } else {
+                usleep(100);
+            }
+        }
+        
+        // Close the camera after running with default settings
+        std::cout << "Camera " << camera_id << ": Closing camera after default settings run" << std::endl;
+        camera->closeCamera();
+        
+        // Small delay before reopening
+        usleep(500000);  // 500ms delay
+    }
+    
+    // Create configuration for the camera with requested settings
     oc::ArgusCameraConfig config;
     config.mDeviceId = camera_id;
     config.mFPS = rq_fps;
@@ -295,7 +355,7 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     config.verbose_level = 3;
     config.hdr = false;
 
-    // Open the camera
+    // Open the camera with requested settings
     std::cout << "Camera " << camera_id << ": Opening camera with requested resolution: " 
               << (rq_width > 0 ? std::to_string(rq_width) : "default") 
               << "x" << (rq_height > 0 ? std::to_string(rq_height) : "default")
@@ -417,9 +477,9 @@ int main(int argc, char *argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-int rq_width = 0;
-int rq_height = 0;
-int rq_fps = 0;
+int rq_width = 960;
+int rq_height = 600;
+int rq_fps = 15;
 
 if (argc > 1) rq_width = atoi(argv[1]);
 if (argc > 2) rq_height = atoi(argv[2]);

@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <csignal>
 #include <algorithm>
+#include <deque>
 #include "ArgusCapture.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -31,6 +32,17 @@ struct CameraPipeline {
     std::string stream_name;
     std::mutex mutex;
 };
+
+// Structure to hold temporary frame data
+struct FrameBuffer {
+    std::vector<unsigned char> data;
+    int width;
+    int height;
+    int channels;
+};
+
+// Deque to store temporary frames for each camera
+static std::vector<std::deque<FrameBuffer>> g_temp_frames;
 
 // Global vector to store camera pipelines
 static std::vector<std::unique_ptr<CameraPipeline>> camera_pipelines;
@@ -317,7 +329,63 @@ void cameraThread(int camera_id, int width, int height, int fps) {
               << camera->getWidth() << "x" << camera->getHeight() 
               << ", channels: " << camera->getNumberOfChannels() << std::endl;
     
-    // Initialize GStreamer pipeline
+    // Capture frames for 2 seconds before initializing GStreamer
+    std::cout << "Camera " << camera_id << ": Capturing frames for 2 seconds before initializing GStreamer..." << std::endl;
+    
+    auto start_time = std::chrono::steady_clock::now();
+    int temp_frame_count = 0;
+    
+    // Ensure the temporary frames vector for this camera is initialized
+    if (camera_id >= g_temp_frames.size()) {
+        g_temp_frames.resize(camera_id + 1);
+    }
+    
+    // Clear any existing frames
+    g_temp_frames[camera_id].clear();
+    
+    // Capture frames for 2 seconds
+    while (!g_terminate.load()) {
+        auto current_time = std::chrono::steady_clock::now();
+        auto elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
+        
+        // Break after 2 seconds
+        if (elapsed_time >= 2000) {
+            break;
+        }
+        
+        if (camera->isNewFrame()) {
+            // Get the raw pixel data
+            unsigned char* pixel_data = camera->getPixels();
+            
+            if (pixel_data != nullptr) {
+                // Create a new frame buffer
+                FrameBuffer frame;
+                frame.width = camera->getWidth();
+                frame.height = camera->getHeight();
+                frame.channels = camera->getNumberOfChannels();
+                
+                // Calculate buffer size
+                size_t buffer_size = frame.width * frame.height * frame.channels;
+                
+                // Copy the pixel data
+                frame.data.resize(buffer_size);
+                memcpy(frame.data.data(), pixel_data, buffer_size);
+                
+                // Store the frame
+                g_temp_frames[camera_id].push_back(std::move(frame));
+                
+                temp_frame_count++;
+                std::cout << "Camera " << camera_id << ": Temporary frame captured: " << temp_frame_count << std::endl;
+            }
+        } else {
+            // Sleep a bit to avoid busy waiting
+            usleep(1000);
+        }
+    }
+    
+    std::cout << "Camera " << camera_id << ": Captured " << temp_frame_count << " frames in 2 seconds" << std::endl;
+    
+    // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 
                                        camera->getWidth(), camera->getHeight(), 
                                        camera->getNumberOfChannels())) {
@@ -336,6 +404,20 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         delete camera;
         return;
     }
+    
+    // First, process the temporary frames we captured
+    std::cout << "Camera " << camera_id << ": Processing " << g_temp_frames[camera_id].size() << " temporary frames..." << std::endl;
+    for (const auto& frame : g_temp_frames[camera_id]) {
+        if (!writeToGstreamerShmsink(camera_id, frame.data.data(), 
+                                    frame.width, frame.height, 
+                                    frame.channels)) {
+            std::cerr << "Camera " << camera_id << ": Failed to write temporary frame to GStreamer pipeline" << std::endl;
+        }
+    }
+    
+    // Clear the temporary frames to free memory
+    g_temp_frames[camera_id].clear();
+    std::cout << "Camera " << camera_id << ": Temporary frames processed and memory cleared" << std::endl;
     
     int image_count = 0;
     
@@ -401,15 +483,6 @@ int main(int argc, char *argv[]) {
     // Set up signal handler for graceful termination
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    
-    // Initialize GStreamer early to catch any initialization errors
-    GError *gst_error = nullptr;
-    if (!gst_init_check(nullptr, nullptr, &gst_error)) {
-        std::cerr << "Failed to initialize GStreamer: " << (gst_error ? gst_error->message : "Unknown error") << std::endl;
-        if (gst_error) g_error_free(gst_error);
-        return -1;
-    }
-    std::cout << "GStreamer initialized successfully" << std::endl;
 
     int rq_width = 960;
     int rq_height = 600;

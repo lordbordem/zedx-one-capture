@@ -8,6 +8,7 @@
 #include <vector>
 #include <signal.h>
 #include <csignal>
+#include <algorithm>
 #include "ArgusCapture.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>

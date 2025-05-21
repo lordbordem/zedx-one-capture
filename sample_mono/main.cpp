@@ -24,7 +24,7 @@ struct CameraPipeline {
 };
 
 // Global vector to store camera pipelines
-static std::vector<CameraPipeline> camera_pipelines;
+static std::vector<std::unique_ptr<CameraPipeline>> camera_pipelines;
 
 // Function to create GStreamer shmsink pipeline
 bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_path, 
@@ -37,8 +37,8 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     }
 
     // Get reference to the camera pipeline
-    CameraPipeline &pipeline_data = camera_pipelines[camera_index];
-    std::lock_guard<std::mutex> lock(pipeline_data.mutex);
+    CameraPipeline *pipeline_data = camera_pipelines[camera_index].get();
+    std::lock_guard<std::mutex> lock(pipeline_data->mutex);
     
     // Initialize GStreamer if not already initialized
     static bool gst_initialized = false;
@@ -53,18 +53,18 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     }
     
     // Store frame dimensions
-    pipeline_data.frame_width = width;
-    pipeline_data.frame_height = height;
-    pipeline_data.socket_path = socket_path;
-    pipeline_data.stream_name = stream_name;
+    pipeline_data->frame_width = width;
+    pipeline_data->frame_height = height;
+    pipeline_data->socket_path = socket_path;
+    pipeline_data->stream_name = stream_name;
     
     // Create pipeline elements
-    pipeline_data.pipeline = gst_pipeline_new(("opencv-to-shmsink-" + std::to_string(camera_index)).c_str());
-    pipeline_data.appsrc = gst_element_factory_make("appsrc", ("source-" + std::to_string(camera_index)).c_str());
+    pipeline_data->pipeline = gst_pipeline_new(("opencv-to-shmsink-" + std::to_string(camera_index)).c_str());
+    pipeline_data->appsrc = gst_element_factory_make("appsrc", ("source-" + std::to_string(camera_index)).c_str());
     GstElement *videoconvert = gst_element_factory_make("videoconvert", ("converter-" + std::to_string(camera_index)).c_str());
     GstElement *shmsink = gst_element_factory_make("shmsink", ("sink-" + std::to_string(camera_index)).c_str());
     
-    if (!pipeline_data.pipeline || !pipeline_data.appsrc || !videoconvert || !shmsink) {
+    if (!pipeline_data->pipeline || !pipeline_data->appsrc || !videoconvert || !shmsink) {
         std::cerr << "Failed to create GStreamer elements for camera " << camera_index << std::endl;
         return false;
     }
@@ -77,7 +77,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
                                        "framerate", GST_TYPE_FRACTION, 30, 1,
                                        nullptr);
     
-    g_object_set(G_OBJECT(pipeline_data.appsrc),
+    g_object_set(G_OBJECT(pipeline_data->appsrc),
                 "caps", caps,
                 "format", GST_FORMAT_TIME,
                 "is-live", TRUE,
@@ -94,22 +94,22 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
                 nullptr);
     
     // Add elements to pipeline
-    gst_bin_add_many(GST_BIN(pipeline_data.pipeline), pipeline_data.appsrc, videoconvert, shmsink, nullptr);
+    gst_bin_add_many(GST_BIN(pipeline_data->pipeline), pipeline_data->appsrc, videoconvert, shmsink, nullptr);
     
     // Link elements
-    if (!gst_element_link_many(pipeline_data.appsrc, videoconvert, shmsink, nullptr)) {
+    if (!gst_element_link_many(pipeline_data->appsrc, videoconvert, shmsink, nullptr)) {
         std::cerr << "Failed to link GStreamer elements for camera " << camera_index << std::endl;
-        gst_object_unref(pipeline_data.pipeline);
-        pipeline_data.pipeline = nullptr;
+        gst_object_unref(pipeline_data->pipeline);
+        pipeline_data->pipeline = nullptr;
         return false;
     }
     
     // Start pipeline
-    GstStateChangeReturn ret = gst_element_set_state(pipeline_data.pipeline, GST_STATE_PLAYING);
+    GstStateChangeReturn ret = gst_element_set_state(pipeline_data->pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         std::cerr << "Failed to start GStreamer pipeline for camera " << camera_index << std::endl;
-        gst_object_unref(pipeline_data.pipeline);
-        pipeline_data.pipeline = nullptr;
+        gst_object_unref(pipeline_data->pipeline);
+        pipeline_data->pipeline = nullptr;
         return false;
     }
     
@@ -128,8 +128,8 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     }
 
     // Get reference to the camera pipeline
-    CameraPipeline &pipeline_data = camera_pipelines[camera_index];
-    std::lock_guard<std::mutex> lock(pipeline_data.mutex);
+    CameraPipeline *pipeline_data = camera_pipelines[camera_index].get();
+    std::lock_guard<std::mutex> lock(pipeline_data->mutex);
     
     // Check if frame is valid
     if (frame.empty()) {
@@ -138,13 +138,13 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     }
     
     // Initialize GStreamer pipeline if not already initialized
-    if (pipeline_data.pipeline == nullptr) {
+    if (pipeline_data->pipeline == nullptr) {
         std::cerr << "Pipeline not initialized for camera " << camera_index << std::endl;
         return false;
     }
     
     // Check if frame dimensions match the pipeline configuration
-    if (frame.cols != pipeline_data.frame_width || frame.rows != pipeline_data.frame_height) {
+    if (frame.cols != pipeline_data->frame_width || frame.rows != pipeline_data->frame_height) {
         std::cerr << "Frame dimensions do not match pipeline configuration for camera " << camera_index << std::endl;
         return false;
     }
@@ -164,17 +164,17 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
         gst_buffer_unmap(buffer, &map);
         
         // Set buffer timestamp and duration
-        GST_BUFFER_PTS(buffer) = pipeline_data.frame_count * 33333333; // 30fps (in nanoseconds)
+        GST_BUFFER_PTS(buffer) = pipeline_data->frame_count * 33333333; // 30fps (in nanoseconds)
         GST_BUFFER_DURATION(buffer) = 33333333;
         
         // Push buffer to appsrc
-        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(pipeline_data.appsrc), buffer);
+        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(pipeline_data->appsrc), buffer);
         if (ret != GST_FLOW_OK) {
             std::cerr << "Failed to push buffer to GStreamer pipeline for camera " << camera_index << std::endl;
             return false;
         }
         
-        pipeline_data.frame_count++;
+        pipeline_data->frame_count++;
         return true;
     } else {
         std::cerr << "Failed to map GStreamer buffer for camera " << camera_index << std::endl;
@@ -186,14 +186,16 @@ bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
 // Function to clean up GStreamer resources for a specific camera
 void cleanupGstreamerPipeline(int camera_index) {
     if (camera_index >= 0 && camera_index < camera_pipelines.size()) {
-        CameraPipeline &pipeline_data = camera_pipelines[camera_index];
-        std::lock_guard<std::mutex> lock(pipeline_data.mutex);
-        
-        if (pipeline_data.pipeline) {
-            gst_element_set_state(pipeline_data.pipeline, GST_STATE_NULL);
-            gst_object_unref(pipeline_data.pipeline);
-            pipeline_data.pipeline = nullptr;
-            std::cout << "GStreamer pipeline for camera " << camera_index << " cleaned up" << std::endl;
+        CameraPipeline *pipeline_data = camera_pipelines[camera_index].get();
+        if (pipeline_data) {
+            std::lock_guard<std::mutex> lock(pipeline_data->mutex);
+            
+            if (pipeline_data->pipeline) {
+                gst_element_set_state(pipeline_data->pipeline, GST_STATE_NULL);
+                gst_object_unref(pipeline_data->pipeline);
+                pipeline_data->pipeline = nullptr;
+                std::cout << "GStreamer pipeline for camera " << camera_index << " cleaned up" << std::endl;
+            }
         }
     }
 }
@@ -442,7 +444,9 @@ int main(int argc, char *argv[]) {
         }
         
         // Initialize camera_pipelines vector with the number of available cameras
-        camera_pipelines.resize(available_camera_ids.size());
+        for (size_t i = 0; i < available_camera_ids.size(); i++) {
+            camera_pipelines.push_back(std::make_unique<CameraPipeline>());
+        }
         
         // Create threads for each camera
         std::vector<std::thread> camera_threads;

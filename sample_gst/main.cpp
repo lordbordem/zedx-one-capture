@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <deque>
 #include "ArgusCapture.hpp"
+#include "opencv2/opencv.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 
@@ -260,8 +261,8 @@ void cleanupAllResources() {
     cleanupAllCameras();
 }
 
-// Thread function to handle a camera
-void cameraThread(int camera_id, int width, int height, int fps) {
+// Thread function to handle a single camera
+void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     std::string socket_path = "/dev/shm/sensor_" + std::to_string(camera_id);
     std::string stream_name = "argus_camera_" + std::to_string(camera_id) + "_stream";
     
@@ -286,27 +287,20 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         g_cameras.push_back(camera);
     }
     
+    // Create configuration for the camera
     oc::ArgusCameraConfig config;
-    
-    // Configure camera
     config.mDeviceId = camera_id;
-    config.mFPS = fps;
-    config.mWidth = width;
-    config.mHeight = height;
-    config.verbose_level = 4;
+    config.mFPS = rq_fps;
+    config.mWidth = rq_width;
+    config.mHeight = rq_height;
+    config.verbose_level = 3;
     config.hdr = false;
-    
-    // Additional configuration to address frequency range issues
-    if (fps >= 20) {
-        std::cout << "Camera " << camera_id << ": Trying with 15 FPS instead of " << fps << " FPS to address frequency range issue" << std::endl;
-        config.mFPS = 15;
-    }
-    
+
     // Open the camera
     std::cout << "Camera " << camera_id << ": Opening camera with requested resolution: " 
-              << (width > 0 ? std::to_string(width) : "default") 
-              << "x" << (height > 0 ? std::to_string(height) : "default")
-              << ", requested FPS: " << (fps > 0 ? std::to_string(fps) : "default") << std::endl;
+              << (rq_width > 0 ? std::to_string(rq_width) : "default") 
+              << "x" << (rq_height > 0 ? std::to_string(rq_height) : "default")
+              << ", requested FPS: " << (rq_fps > 0 ? std::to_string(rq_fps) : "default") << std::endl;
     
     oc::ARGUS_STATE state = camera->openCamera(config);
     if (state != oc::ARGUS_STATE::OK) {
@@ -324,16 +318,10 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         delete camera;
         return;
     }
-    
+
     std::cout << "Camera " << camera_id << ": Camera opened successfully with resolution: " 
               << camera->getWidth() << "x" << camera->getHeight() 
               << ", channels: " << camera->getNumberOfChannels() << std::endl;
-    
-    // Capture frames for 2 seconds before initializing GStreamer
-    std::cout << "Camera " << camera_id << ": Capturing frames for 2 seconds before initializing GStreamer..." << std::endl;
-    
-    auto start_time = std::chrono::steady_clock::now();
-    int temp_frame_count = 0;
     
     // Ensure the temporary frames vector for this camera is initialized
     if (camera_id >= g_temp_frames.size()) {
@@ -342,48 +330,6 @@ void cameraThread(int camera_id, int width, int height, int fps) {
     
     // Clear any existing frames
     g_temp_frames[camera_id].clear();
-    
-    // Capture frames for 2 seconds
-    while (!g_terminate.load()) {
-        auto current_time = std::chrono::steady_clock::now();
-        auto elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
-        
-        // Break after 2 seconds
-        if (elapsed_time >= 2000) {
-            break;
-        }
-        
-        if (camera->isNewFrame()) {
-            // Get the raw pixel data
-            unsigned char* pixel_data = camera->getPixels();
-            
-            if (pixel_data != nullptr) {
-                // Create a new frame buffer
-                FrameBuffer frame;
-                frame.width = camera->getWidth();
-                frame.height = camera->getHeight();
-                frame.channels = camera->getNumberOfChannels();
-                
-                // Calculate buffer size
-                size_t buffer_size = frame.width * frame.height * frame.channels;
-                
-                // Copy the pixel data
-                frame.data.resize(buffer_size);
-                memcpy(frame.data.data(), pixel_data, buffer_size);
-                
-                // Store the frame
-                g_temp_frames[camera_id].push_back(std::move(frame));
-                
-                temp_frame_count++;
-                std::cout << "Camera " << camera_id << ": Temporary frame captured: " << temp_frame_count << std::endl;
-            }
-        } else {
-            // Sleep a bit to avoid busy waiting
-            usleep(1000);
-        }
-    }
-    
-    std::cout << "Camera " << camera_id << ": Captured " << temp_frame_count << " frames in 2 seconds" << std::endl;
     
     // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 
@@ -405,19 +351,7 @@ void cameraThread(int camera_id, int width, int height, int fps) {
         return;
     }
     
-    // First, process the temporary frames we captured
-    std::cout << "Camera " << camera_id << ": Processing " << g_temp_frames[camera_id].size() << " temporary frames..." << std::endl;
-    for (const auto& frame : g_temp_frames[camera_id]) {
-        if (!writeToGstreamerShmsink(camera_id, frame.data.data(), 
-                                    frame.width, frame.height, 
-                                    frame.channels)) {
-            std::cerr << "Camera " << camera_id << ": Failed to write temporary frame to GStreamer pipeline" << std::endl;
-        }
-    }
-    
-    // Clear the temporary frames to free memory
-    g_temp_frames[camera_id].clear();
-    std::cout << "Camera " << camera_id << ": Temporary frames processed and memory cleared" << std::endl;
+    // No temporary frames to process
     
     int image_count = 0;
     
@@ -484,98 +418,21 @@ int main(int argc, char *argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    int rq_width = 960;
-    int rq_height = 600;
-    int rq_fps = 30; // Default to 30 fps instead of 0
+int rq_width = 0;
+int rq_height = 0;
+int rq_fps = 0;
 
-    if (argc > 1) rq_width = atoi(argv[1]);
-    if (argc > 2) rq_height = atoi(argv[2]);
-    if (argc > 3) rq_fps = atoi(argv[3]);
-    
-    // Ensure FPS is within a valid range (typically 15-60 for most cameras)
-    if (rq_fps < 15 || rq_fps > 60) {
-        std::cout << "Warning: Requested FPS (" << rq_fps << ") might be out of valid range. Setting to 30 FPS." << std::endl;
-        rq_fps = 30;
-    }
+if (argc > 1) rq_width = atoi(argv[1]);
+if (argc > 2) rq_height = atoi(argv[2]);
+if (argc > 3) rq_fps = atoi(argv[3]);
 
     try {
         int major, minor, patch;
         oc::ArgusVirtualCapture::getVersion(major, minor, patch);
         std::cout << "Argus Capture Version: " << major << "." << minor << "." << patch << std::endl;
 
-        // Get Argus devices with error handling for invalid camera provider
-        std::vector<oc::ArgusDevice> devs;
-        bool devices_found = false;
-        int retry_count = 0;
-        const int max_retries = 2; // Try once, then retry once after restarting service
-        
-        while (!devices_found && retry_count < max_retries) {
-            try {
-                devs = oc::ArgusBayerCapture::getArgusDevices();
-                if (devs.empty()) {
-                    std::cerr << "No Argus devices found!" << std::endl;
-                    
-                    if (retry_count < max_retries - 1) {
-                        std::cout << "Attempting to restart nvargus-daemon service..." << std::endl;
-                        // Restart the nvargus-daemon service
-                        int restart_result = system("sudo systemctl restart nvargus-daemon");
-                        if (restart_result == 0) {
-                            std::cout << "nvargus-daemon service restarted successfully" << std::endl;
-                            // Wait a moment for the service to fully initialize
-                            std::cout << "Waiting for service to initialize..." << std::endl;
-                            sleep(5);
-                        } else {
-                            std::cerr << "Failed to restart nvargus-daemon service (error code: " << restart_result << ")" << std::endl;
-                        }
-                    } else {
-                        std::cerr << "Still no Argus devices found after restarting service" << std::endl;
-                        return -1;
-                    }
-                } else {
-                    devices_found = true;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error getting Argus devices: " << e.what() << std::endl;
-                
-                if (retry_count < max_retries - 1) {
-                    std::cout << "Attempting to restart nvargus-daemon service..." << std::endl;
-                    int restart_result = system("sudo systemctl restart nvargus-daemon");
-                    if (restart_result == 0) {
-                        std::cout << "nvargus-daemon service restarted successfully" << std::endl;
-                        sleep(5);
-                    } else {
-                        std::cerr << "Failed to restart nvargus-daemon service (error code: " << restart_result << ")" << std::endl;
-                    }
-                } else {
-                    return -1;
-                }
-            } catch (...) {
-                std::cerr << "Unknown error getting Argus devices. This might be due to an invalid camera provider." << std::endl;
-                std::cerr << "Make sure the Argus camera service is running and the camera is properly connected." << std::endl;
-                
-                if (retry_count < max_retries - 1) {
-                    std::cout << "Attempting to restart nvargus-daemon service..." << std::endl;
-                    int restart_result = system("sudo systemctl restart nvargus-daemon");
-                    if (restart_result == 0) {
-                        std::cout << "nvargus-daemon service restarted successfully" << std::endl;
-                        sleep(5);
-                    } else {
-                        std::cerr << "Failed to restart nvargus-daemon service (error code: " << restart_result << ")" << std::endl;
-                    }
-                } else {
-                    return -1;
-                }
-            }
-            
-            retry_count++;
-        }
-        
-        if (!devices_found) {
-            std::cerr << "Failed to find Argus devices after " << max_retries << " attempts" << std::endl;
-            return -1;
-        }
-        
-        // Print available devices
+        // Get all Argus devices
+        std::vector<oc::ArgusDevice> devs = oc::ArgusBayerCapture::getArgusDevices();
         std::cout << "Found " << devs.size() << " Argus devices:" << std::endl;
         for (int i = 0; i < devs.size(); i++) {
             std::cout << "##################" << std::endl;
@@ -586,7 +443,7 @@ int main(int argc, char *argv[]) {
         }
         std::cout << "***********************" << std::endl;
 
-        // Count available cameras
+        // Find available cameras
         std::vector<int> available_camera_ids;
         for (const auto& dev : devs) {
             if (dev.available) {
@@ -623,7 +480,7 @@ int main(int argc, char *argv[]) {
         
         std::cout << "All camera threads started. Press Ctrl+C to exit." << std::endl;
         
-        // Wait for all threads to complete or for termination signal
+        // Wait for all threads to complete
         for (auto& thread : camera_threads) {
             thread.join();
         }

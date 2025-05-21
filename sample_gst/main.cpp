@@ -287,8 +287,8 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     }
     
     // Check if we need to run the camera with default settings first
-    // (This is needed for 960x600 at 15FPS to work properly)
-    bool needs_two_stage_init = (rq_width == 960 && rq_height == 600 && rq_fps == 15);
+    // (This is needed for 960x600 to work properly)
+    bool needs_two_stage_init = (rq_width == 960 && rq_height == 600);
     
     if (needs_two_stage_init) {
         std::cout << "Camera " << camera_id << ": Using two-stage initialization for 960x600@15FPS" << std::endl;

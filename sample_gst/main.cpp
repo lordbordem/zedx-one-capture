@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <deque>
 #include "ArgusCapture.hpp"
+#include "opencv2/opencv.hpp"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 
@@ -58,8 +59,7 @@ void signal_handler(int signal) {
 // Function to create GStreamer shmsink pipeline
 bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_path, 
                                    const std::string &stream_name, 
-                                   int width = 0, int height = 0, 
-                                   int channels = 4) {
+                                   int width = 0, int height = 0) {
     // Ensure camera_index is valid
     if (camera_index >= camera_pipelines.size()) {
         std::cerr << "Invalid camera index: " << camera_index << std::endl;
@@ -99,11 +99,9 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
         return false;
     }
     
-    // Configure appsrc with the appropriate format based on the number of channels
-    const char* format_str = (channels == 4) ? "BGRA" : (channels == 3) ? "RGB" : "GRAY8";
-    
+    // Configure appsrc
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                       "format", G_TYPE_STRING, format_str,
+                                       "format", G_TYPE_STRING, "BGR",
                                        "width", G_TYPE_INT, width,
                                        "height", G_TYPE_INT, height,
                                        "framerate", GST_TYPE_FRACTION, 30, 1,
@@ -151,8 +149,8 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     return true;
 }
 
-// Function to write raw pixel data to GStreamer shmsink pipeline
-bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, int width, int height, int channels) {
+// Function to write OpenCV Mat to GStreamer shmsink pipeline
+bool writeToGstreamerShmsink(int camera_index, cv::Mat &frame) {
     // Ensure camera_index is valid
     if (camera_index >= camera_pipelines.size()) {
         std::cerr << "Invalid camera index: " << camera_index << std::endl;
@@ -163,9 +161,9 @@ bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, 
     CameraPipeline *pipeline_data = camera_pipelines[camera_index].get();
     std::lock_guard<std::mutex> lock(pipeline_data->mutex);
     
-    // Check if pixel data is valid
-    if (pixel_data == nullptr) {
-        std::cerr << "Error: Cannot write null pixel data to GStreamer pipeline for camera " << camera_index << std::endl;
+    // Check if frame is valid
+    if (frame.empty()) {
+        std::cerr << "Error: Cannot write empty frame to GStreamer pipeline for camera " << camera_index << std::endl;
         return false;
     }
     
@@ -176,16 +174,13 @@ bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, 
     }
     
     // Check if frame dimensions match the pipeline configuration
-    if (width != pipeline_data->frame_width || height != pipeline_data->frame_height) {
+    if (frame.cols != pipeline_data->frame_width || frame.rows != pipeline_data->frame_height) {
         std::cerr << "Frame dimensions do not match pipeline configuration for camera " << camera_index << std::endl;
         return false;
     }
     
-    // Calculate buffer size based on dimensions and channels
-    size_t buffer_size = width * height * channels;
-    
-    // Create GstBuffer from pixel data
-    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, buffer_size, nullptr);
+    // Create GstBuffer from OpenCV Mat
+    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, frame.total() * frame.elemSize(), nullptr);
     if (!buffer) {
         std::cerr << "Failed to allocate GStreamer buffer for camera " << camera_index << std::endl;
         return false;
@@ -194,8 +189,8 @@ bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, 
     // Map buffer for writing
     GstMapInfo map;
     if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
-        // Copy pixel data to buffer
-        memcpy(map.data, pixel_data, buffer_size);
+        // Copy frame data to buffer
+        memcpy(map.data, frame.data, frame.total() * frame.elemSize());
         gst_buffer_unmap(buffer, &map);
         
         // Set buffer timestamp and duration
@@ -390,13 +385,9 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     // Clear any existing frames
     g_temp_frames[camera_id].clear();
 
-    printf("requested gstreamer width %d", camera->getWidth());
-    printf("requested gstreamer height %d", camera->getHeight());
-    
     // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 
-                                       camera->getWidth(), camera->getHeight(), 
-                                       camera->getNumberOfChannels())) {
+                                       camera->getWidth(), camera->getHeight())) {
         std::cerr << "Camera " << camera_id << ": Failed to create GStreamer pipeline, exiting..." << std::endl;
         camera->closeCamera();
         
@@ -425,16 +416,26 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
             // Update the last frame time when a new frame is received
             last_frame_time = std::chrono::steady_clock::now();
             
-            // Get the raw pixel data directly from the camera
+            // Get the raw pixel data from the camera
             unsigned char* pixel_data = camera->getPixels();
             
-            // Check if pixel data is valid before writing to GStreamer
+            // Check if pixel data is valid before creating OpenCV Mat
             if (pixel_data != nullptr) {
-                // Write the pixel data directly to GStreamer shmsink pipeline
-                if (!writeToGstreamerShmsink(camera_id, pixel_data, 
-                                           camera->getWidth(), camera->getHeight(), 
-                                           camera->getNumberOfChannels())) {
-                    std::cerr << "Camera " << camera_id << ": Failed to write frame to GStreamer pipeline" << std::endl;
+                // Create OpenCV Mat from camera pixels
+                cv::Mat frame(camera->getHeight(), camera->getWidth(), CV_8UC4);
+                
+                // Copy pixel data to OpenCV Mat
+                memcpy(frame.data, pixel_data, 
+                       camera->getWidth() * camera->getHeight() * camera->getNumberOfChannels());
+                
+                // Check if the frame is valid before writing to GStreamer
+                if (!frame.empty()) {
+                    // Write the frame to GStreamer shmsink pipeline
+                    if (!writeToGstreamerShmsink(camera_id, frame)) {
+                        std::cerr << "Camera " << camera_id << ": Failed to write frame to GStreamer pipeline" << std::endl;
+                    }
+                } else {
+                    std::cerr << "Camera " << camera_id << ": Warning: Skipping empty frame" << std::endl;
                 }
             } else {
                 std::cerr << "Camera " << camera_id << ": Warning: Skipping null pixel data" << std::endl;

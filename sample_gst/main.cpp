@@ -100,7 +100,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     }
     
     // Configure appsrc with the appropriate format based on the number of channels
-    const char* format_str = (channels == 4) ? "RGBA" : (channels == 3) ? "RGB" : "GRAY8";
+    const char* format_str = (channels == 4) ? "BGRA" : (channels == 3) ? "RGB" : "GRAY8";
     
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
                                        "format", G_TYPE_STRING, format_str,
@@ -121,7 +121,7 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
                 "socket-path", socket_path.c_str(),
                 "sync", FALSE,
                 "wait-for-connection", FALSE,
-                "shm-size", 100 * 1024 * 1024, // 100MB buffer
+                "shm-size", 100 * 2024 * 2024, // 100MB buffer
                 "stream-name", stream_name.c_str(),
                 nullptr);
     
@@ -389,6 +389,9 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     
     // Clear any existing frames
     g_temp_frames[camera_id].clear();
+
+    print("requested gstreamer width ", camera->getWidth())
+    print("requested gstreamer height ", camera->getHeight())
     
     // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 

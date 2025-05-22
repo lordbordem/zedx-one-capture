@@ -182,7 +182,9 @@ bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, 
     }
     
     // Calculate buffer size based on dimensions and channels
-    size_t buffer_size = width * height * channels;
+    // Ensure proper stride alignment (4-byte alignment is common for image data)
+    int stride = ((width * channels + 3) / 4) * 4; // Align to 4 bytes
+    size_t buffer_size = stride * height;
     
     // Create GstBuffer from pixel data
     GstBuffer *buffer = gst_buffer_new_allocate(nullptr, buffer_size, nullptr);
@@ -194,8 +196,25 @@ bool writeToGstreamerShmsink(int camera_index, const unsigned char* pixel_data, 
     // Map buffer for writing
     GstMapInfo map;
     if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
-        // Copy pixel data to buffer
-        memcpy(map.data, pixel_data, buffer_size);
+        // Copy pixel data to buffer with proper stride handling
+        if (stride == width * channels) {
+            // No padding needed, can copy in one go
+            memcpy(map.data, pixel_data, buffer_size);
+        } else {
+            // Copy row by row to handle stride correctly
+            const unsigned char* src_row = pixel_data;
+            unsigned char* dst_row = map.data;
+            int row_bytes = width * channels;
+            
+            for (int y = 0; y < height; y++) {
+                memcpy(dst_row, src_row, row_bytes);
+                // Move to next row in source (might not have padding)
+                src_row += row_bytes;
+                // Move to next row in destination (with stride)
+                dst_row += stride;
+            }
+        }
+        
         gst_buffer_unmap(buffer, &map);
         
         // Set buffer timestamp and duration
@@ -565,4 +584,3 @@ if (argc > 3) rq_fps = atoi(argv[3]);
     std::cout << "Program exiting cleanly" << std::endl;
     return 0;
 }
-

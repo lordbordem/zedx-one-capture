@@ -102,12 +102,33 @@ bool createGstreamerShmsinkPipeline(int camera_index, const std::string &socket_
     // Configure appsrc with the appropriate format based on the number of channels
     const char* format_str = (channels == 4) ? "BGRA" : (channels == 3) ? "RGB" : "GRAY8";
     
-    GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                       "format", G_TYPE_STRING, format_str,
-                                       "width", G_TYPE_INT, width,
-                                       "height", G_TYPE_INT, height,
-                                       "framerate", GST_TYPE_FRACTION, 30, 1,
-                                       nullptr);
+    // Special handling for 960x600 resolution
+    bool is_960x600 = (width == 960 && height == 600);
+    
+    // Create caps with stride alignment for 960x600
+    GstCaps *caps;
+    if (is_960x600) {
+        // For 960x600, explicitly set stride alignment
+        int stride = ((width * channels + 3) / 4) * 4; // 4-byte alignment
+        
+        std::cout << "Camera " << camera_index << ": Using special caps for 960x600 with stride: " << stride << std::endl;
+        
+        caps = gst_caps_new_simple("video/x-raw",
+                                  "format", G_TYPE_STRING, format_str,
+                                  "width", G_TYPE_INT, width,
+                                  "height", G_TYPE_INT, height,
+                                  "framerate", GST_TYPE_FRACTION, 30, 1,
+                                  "stride", G_TYPE_INT, stride,
+                                  nullptr);
+    } else {
+        // Standard caps for other resolutions
+        caps = gst_caps_new_simple("video/x-raw",
+                                  "format", G_TYPE_STRING, format_str,
+                                  "width", G_TYPE_INT, width,
+                                  "height", G_TYPE_INT, height,
+                                  "framerate", GST_TYPE_FRACTION, 30, 1,
+                                  nullptr);
+    }
     
     g_object_set(G_OBJECT(pipeline_data->appsrc),
                 "caps", caps,
@@ -323,12 +344,17 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
         
         std::cout << "Camera " << camera_id << ": Stage 1 - Opening camera with default settings" << std::endl;
         
-        oc::ARGUS_STATE state = camera->openCamera(default_config);
+        // Create a separate camera object for the first stage
+        oc::ArgusBayerCapture* first_stage_camera = new oc::ArgusBayerCapture();
+        
+        oc::ARGUS_STATE state = first_stage_camera->openCamera(default_config);
         if (state != oc::ARGUS_STATE::OK) {
             std::cerr << "Camera " << camera_id << ": Failed to open Camera with default settings, error code " 
                       << ARGUS_STATE2str(state) << std::endl;
             
-            // Remove camera from cleanup list
+            delete first_stage_camera;
+            
+            // Remove main camera from cleanup list
             {
                 std::lock_guard<std::mutex> lock(g_cameras_mutex);
                 auto it = std::find(g_cameras.begin(), g_cameras.end(), camera);
@@ -342,14 +368,14 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
         }
         
         std::cout << "Camera " << camera_id << ": Camera opened with default settings. Resolution: " 
-                  << camera->getWidth() << "x" << camera->getHeight() 
-                  << ", channels: " << camera->getNumberOfChannels() << std::endl;
+                  << first_stage_camera->getWidth() << "x" << first_stage_camera->getHeight() 
+                  << ", channels: " << first_stage_camera->getNumberOfChannels() << std::endl;
         
         // Run for 10 frames with default settings
         std::cout << "Camera " << camera_id << ": Running 10 frames with default settings..." << std::endl;
         int frame_count = 0;
         while (frame_count < 10 && !g_terminate.load()) {
-            if (camera->isNewFrame()) {
+            if (first_stage_camera->isNewFrame()) {
                 frame_count++;
                 std::cout << "Camera " << camera_id << ": Default settings frame " << frame_count << "/10" << std::endl;
             } else {
@@ -359,10 +385,15 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
         
         // Close the camera after running with default settings
         std::cout << "Camera " << camera_id << ": Closing camera after default settings run" << std::endl;
-        camera->closeCamera();
+        first_stage_camera->closeCamera();
         
-        // Small delay before reopening
-        usleep(500000);  // 500ms delay
+        // Ensure all resources are released
+        delete first_stage_camera;
+        first_stage_camera = nullptr;
+        
+        // Longer delay before reopening to ensure complete cleanup
+        std::cout << "Camera " << camera_id << ": Waiting for camera resources to be fully released..." << std::endl;
+        usleep(2000000);  // 2 second delay
     }
     
     // Create configuration for the camera with requested settings
@@ -409,8 +440,8 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     // Clear any existing frames
     g_temp_frames[camera_id].clear();
 
-    printf("requested gstreamer width %d", camera->getWidth());
-    printf("requested gstreamer height %d", camera->getHeight());
+    printf("requested gstreamer width %d\n", camera->getWidth());
+    printf("requested gstreamer height %d\n", camera->getHeight());
     
     // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 

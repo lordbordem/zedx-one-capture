@@ -390,8 +390,8 @@ void cameraThread(int camera_id, int rq_width, int rq_height, int rq_fps) {
     // Clear any existing frames
     g_temp_frames[camera_id].clear();
 
-    print("requested gstreamer width ", camera->getWidth())
-    print("requested gstreamer height ", camera->getHeight())
+    printf("requested gstreamer width %d", camera->getWidth());
+    printf("requested gstreamer height %d", camera->getHeight());
     
     // Now initialize GStreamer pipeline
     if (!createGstreamerShmsinkPipeline(camera_id, socket_path, stream_name, 
